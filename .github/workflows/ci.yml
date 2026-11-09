@@ -1,0 +1,100 @@
+# ci.yml — validation builds for pushes to main and pull requests.
+#
+# One job, the full battery, exactly the gates the tree enforces
+# locally:
+#   1. FDK is checked out at a pinned commit, built, and INSTALLED
+#      to a throwaway prefix — the package's dependency is the
+#      installed FDK, and the build then consumes it through
+#      pkg-config only (the isolation proof of docs/EXTENDING.md
+#      §11: no FDK source-tree include path exists on any compile
+#      line here, so a private reach is a compile error, not a
+#      review finding).
+#   2. The package builds (debug under ASan/UBSan — the default),
+#      the headless suite runs, the mock-compositor suite drives a
+#      real in-process Wayland server over a real socket (no desktop
+#      compositor needed — libwayland-server is the entire rig), the
+#      X11-refusal leg runs under a throwaway Xvfb, the optimized
+#      build compiles, and the export verification proves the .so
+#      exports exactly the fdkls_* API.
+#   3. The examples build against the static archive.
+#
+# No secrets are used anywhere in this workflow: everything runs on
+# the ephemeral GITHUB_TOKEN with contents: read. No caching is
+# configured on purpose: every run builds from a clean tree so a
+# green check always means "this exact source builds and passes".
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The FDK commit the package pins (main at the time of the 1.0.0
+  # release). Bump deliberately: the run-time extension-API ladder in
+  # fdkls__shell_open refuses older FDKs, and the compile-time guard
+  # in include/fdkls/fdkls.h refuses older headers.
+  FDK_REF: main
+
+jobs:
+  build-test:
+    name: build + test (ubuntu)
+    runs-on: ubuntu-latest
+    env:
+      FDK_PREFIX: ${{ github.workspace }}/fdk-prefix
+      PKG_CONFIG_PATH: ${{ github.workspace }}/fdk-prefix/lib/pkgconfig
+    steps:
+      - name: Checkout FDK-Layer-Shell
+        uses: actions/checkout@v4
+
+      - name: Checkout FDK
+        uses: actions/checkout@v4
+        with:
+          repository: Faded-Dream-Project/FDK
+          ref: ${{ env.FDK_REF }}
+          path: fdk
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libx11-dev libxext-dev libxrandr-dev \
+            libxrender-dev libwayland-dev libxkbcommon-dev \
+            zlib1g-dev xvfb libgl1 fonts-dejavu-core
+
+      - name: Build and install FDK to a throwaway prefix
+        run: |
+          cd fdk
+          make FDK_SANITIZE=0 -j"$(nproc)"
+          make FDK_SANITIZE=0 install PREFIX="$FDK_PREFIX"
+
+      - name: Build the package (debug, sanitizers)
+        run: make
+
+      - name: Headless test suite
+        run: make test
+
+      - name: Mock-compositor integration suite (sanitized)
+        run: make test-wayland
+
+      - name: X11-refusal leg (throwaway Xvfb)
+        run: make test-x11
+
+      - name: Optimized build + examples + export surface
+        run: |
+          make FDK_CONFIG=release clean
+          make FDK_CONFIG=release static shared
+          make FDK_CONFIG=release examples
+          make FDK_CONFIG=release verify-exports
+
+      - name: Mock-compositor integration suite (release build)
+        run: make FDK_CONFIG=release test-wayland

@@ -1,0 +1,10 @@
+prefix=@PREFIX@
+libdir=@LIBDIR@
+includedir=@INCDIR@
+
+Name: fdk-layershell
+Description: FDK add-on for desktop shell surfaces on wlr-layer-shell (panels, docks, overlays)
+Version: @VERSION@
+Requires: fdk
+Libs: -L${libdir} -lfdk-layershell
+Cflags: -I${includedir}

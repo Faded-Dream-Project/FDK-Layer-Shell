@@ -1,0 +1,9 @@
+build/
+*.o
+*.d
+*.a
+*.so
+*.so.*
+core
+vgcore.*
+test-fdkls-runtime/
