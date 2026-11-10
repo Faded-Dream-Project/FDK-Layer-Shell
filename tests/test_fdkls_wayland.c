@@ -464,7 +464,16 @@ static void output_bind(struct wl_client *client, void *data,
         wl_output_send_scale(res, 1);
     }
     if (version >= 4) {
+        /* The FULL v4 sequence, name-then-description before done —
+         * exactly what real compositors send (a listener that
+         * handles name but not description aborts the client with
+         * "listener function for opcode 5 of wl_output is NULL" —
+         * these lines pinned that fix). FDK's own binding stays
+         * safe: it binds wl_output at v3, so its listener never
+         * sees these events. */
         wl_output_send_name(res, "MOCK-1");
+        wl_output_send_description(res,
+                                   "FDK-Layer-Shell mock output");
     }
     wl_output_send_done(res);
 }

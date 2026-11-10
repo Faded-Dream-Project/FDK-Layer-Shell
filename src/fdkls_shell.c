@@ -57,6 +57,18 @@ static void output_scale(void *data, struct wl_output *output,
     (void)data; (void)output; (void)factor;
 }
 
+/* The description event rides the same v4 sequence as name (the
+ * compositor sends name THEN description before done) — a listener
+ * that handles name but not description aborts the CLIENT on every
+ * real compositor ("listener function for opcode 5 of wl_output is
+ * NULL"; the mock-compositor suite sends both since the fix). */
+static void output_description(void *data, struct wl_output *output,
+                               const char *description) {
+    (void)data;
+    (void)output;
+    (void)description; /* diagnostics-only; nothing to record */
+}
+
 static void output_name(void *data, struct wl_output *output,
                         const char *name) {
     (void)data;
@@ -89,6 +101,7 @@ static const struct wl_output_listener g_output_listener = {
     .done = output_done,
     .scale = output_scale,
     .name = output_name,
+    .description = output_description,
 };
 
 
