@@ -66,6 +66,7 @@ typedef struct mock_layer mock_layer;
  * FDK's present gate exists to prevent) is wire-side proof. */
 struct mock_surface {
     struct wl_resource *resource;
+    int buffer_scale; /* the set_buffer_scale request, as received */
     mock_layer *layer;         /* the layer role on it, or NULL   */
     mock_surface *next;
 
@@ -101,6 +102,7 @@ typedef struct {
     struct wl_event_loop *loop;
     char socket_name[MOCK_SOCKET_HINT];
     uint32_t layer_shell_version; /* advertised version            */
+    int compositor_version_bound; /* the version the client asked for */
 
     /* Compositor-side recordings (the assertions read these). */
     mock_surface *surfaces;
@@ -519,6 +521,45 @@ static void surface_damage(struct wl_client *client,
     (void)height;
 }
 
+/* v2/v3/v4/v5 surface requests: at v1 surfaces FDK never sent any
+ * of these (the version check was client-side), so the table left
+ * them NULL — and a request landing on a NULL implementation entry
+ * aborts the SERVER ("listener function for opcode 8 of wl_surface
+ * is NULL", from set_buffer_scale the moment surfaces inherited the
+ * real compositor bind's version). At v4 FDK sends set_buffer_scale
+ * from its scale machinery and damage_buffer from its present path;
+ * all four are now handled like a compositor would. */
+static void surface_set_buffer_transform(struct wl_client *client,
+                                         struct wl_resource *resource,
+                                         int32_t transform) {
+    (void)client; (void)resource;
+    (void)transform; /* accepted, not modeled */
+}
+
+static void surface_set_buffer_scale(struct wl_client *client,
+                                     struct wl_resource *resource,
+                                     int32_t scale) {
+    (void)client;
+    mock_surface *s = (mock_surface *)wl_resource_get_user_data(resource);
+    if (s != NULL) {
+        s->buffer_scale = scale; /* recorded for scale assertions */
+    }
+}
+
+static void surface_damage_buffer(struct wl_client *client,
+                                  struct wl_resource *resource,
+                                  int32_t x, int32_t y, int32_t width,
+                                  int32_t height) {
+    (void)client; (void)resource; (void)x; (void)y; (void)width;
+    (void)height;
+}
+
+static void surface_offset(struct wl_client *client,
+                           struct wl_resource *resource, int32_t x,
+                           int32_t y) {
+    (void)client; (void)resource; (void)x; (void)y;
+}
+
 static void surface_frame(struct wl_client *client,
                           struct wl_resource *resource, uint32_t id) {
     (void)resource;
@@ -623,19 +664,36 @@ static const struct wl_surface_interface g_surface_impl = {
     .set_opaque_region = surface_set_opaque_region,
     .set_input_region = surface_set_input_region,
     .commit = surface_commit,
-    .set_buffer_transform = NULL, /* v2: FDK never sends it at v1 */
-    .set_buffer_scale = NULL,     /* v3: ditto                    */
-    .damage_buffer = NULL,        /* v4: ditto                    */
-    .offset = NULL,               /* v5: ditto                    */
+    .set_buffer_transform = surface_set_buffer_transform, /* v2 */
+    .set_buffer_scale = surface_set_buffer_scale,         /* v3 */
+    .damage_buffer = surface_damage_buffer,               /* v4 */
+    .offset = surface_offset,                             /* v5 */
 };
 
 static void compositor_create_surface(struct wl_client *client,
                                       struct wl_resource *resource,
                                       uint32_t id) {
-    (void)resource;
+    /* The surface inherits the compositor proxy's version — real
+     * compositors do exactly this (wl_surface v6 rides a v6
+     * wl_compositor bind). The hardcoded v1 here once hid exactly
+     * that: no matter what the client bound, its surfaces could
+     * never see the preferred-buffer events. */
+    int32_t version = wl_resource_get_version(resource);
     struct wl_resource *res = wl_resource_create(
-        client, &wl_surface_interface, 1, id);
+        client, &wl_surface_interface, version, id);
     assert(res != NULL);
+    if (version >= 6) {
+        /* The v6 preferred-buffer pair, sent at surface creation —
+         * real compositors deliver these by map time, and the client
+         * attaches its listener synchronously before the next
+         * dispatch reads them. A listener without both entries
+         * aborts the client with "listener function for opcode 2 of
+         * wl_surface is NULL" — the desktop crash this line pins.
+         * The addon's wl_compositor cap (v4) must keep its surfaces
+         * below this branch. */
+        wl_surface_send_preferred_buffer_scale(res, 1);
+        wl_surface_send_preferred_buffer_transform(res, 0);
+    }
     mock_surface *s = (mock_surface *)calloc(1, sizeof(*s));
     assert(s != NULL);
     s->resource = res;
@@ -693,6 +751,7 @@ static void compositor_bind(struct wl_client *client, void *data,
         client, &wl_compositor_interface, (int)version, id);
     assert(res != NULL);
     wl_resource_set_implementation(res, &g_compositor_impl, NULL, NULL);
+    g_mock.compositor_version_bound = (int)version;
 }
 
 /* ---- zwlr_layer_shell_v1 ------------------------------------------------------ */
@@ -886,8 +945,11 @@ static void mock_start(uint32_t layer_shell_version) {
     snprintf(g_mock.socket_name, sizeof(g_mock.socket_name), "%s",
              name);
 
+    /* v6 — the real-compositor shape (KWin/wlroots advertise 6);
+     * the version the client binds is recorded and asserted v4 in
+     * leg_shell_and_bar (the FDK 1.0.0 alignment cap). */
     assert(wl_global_create(g_mock.display, &wl_compositor_interface,
-                            1, NULL, compositor_bind) != NULL);
+                            6, NULL, compositor_bind) != NULL);
     /* libwayland's BUILT-IN shm: init_shm creates the wl_shm global
      * and handles every pool/buffer request internally — that is
      * what makes wl_shm_buffer_get() work on the client's buffers. */
@@ -996,6 +1058,7 @@ typedef struct {
     int buffer_commit_count;
     int get_layer_surface_count;
     int last_exclusive_zone;
+    int compositor_version_bound;
 } mock_snapshot;
 
 static mock_snapshot mock_counters(void) {
@@ -1006,6 +1069,7 @@ static mock_snapshot mock_counters(void) {
         .buffer_commit_count = g_mock.buffer_commit_count,
         .get_layer_surface_count = g_mock.get_layer_surface_count,
         .last_exclusive_zone = g_mock.last_exclusive_zone,
+        .compositor_version_bound = g_mock.compositor_version_bound,
     };
     pthread_mutex_unlock(&g_mock_mutex);
     return snap;
@@ -1194,6 +1258,21 @@ static void leg_shell_and_bar(fdk_context *ctx) {
            g_mock.layer_shell_version);
     printf("[ok] shell open: available, protocol v%u\n",
            fdkls_shell_protocol_version(shell));
+
+    /* THE CAP (the wl_surface opcode-2 crash pin): the addon must
+     * bind wl_compositor at v4 — its surfaces inherit the proxy
+     * version, and FDK 1.0.0's wl_surface listener speaks only
+     * enter/leave; on a v6 surface the compositor's
+     * preferred_buffer_scale lands on a NULL handler and aborts the
+     * client on every real compositor. FDK caps its own compositor
+     * at v4; the addon's binding must match. (With the cap gone, the
+     * v6 advertisement + the preferred-buffer pair in
+     * compositor_create_surface reproduce the desktop abort.) */
+    assert(mock_counters().compositor_version_bound == 4 &&
+           "wl_compositor must bind at v4 — the FDK 1.0.0 alignment cap");
+    printf("[ok] compositor cap: wl_compositor bound at v%d (surfaces "
+           "inherit it; FDK 1.0.0's listener speaks enter/leave only)\n",
+           mock_counters().compositor_version_bound);
 
     /* By-name targeting: the mock advertises MOCK-1; an unknown name
      * refuses (NOT_FOUND) before anything reaches the wire. */

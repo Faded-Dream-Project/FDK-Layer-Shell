@@ -114,7 +114,17 @@ static void registry_global(void *data, struct wl_registry *registry,
     (void)registry;
 
     if (strcmp(interface, "wl_compositor") == 0) {
-        uint32_t v = version < 6 ? version : 6;
+        /* v4, NOT the advertised maximum: every surface this proxy
+         * creates inherits its version, and FDK 1.0.0's wl_surface
+         * listener speaks only enter/leave — a v5+/v6 surface
+         * delivers preferred_buffer_scale/transform (opcodes 2/3)
+         * onto NULL handler entries and libwayland aborts the CLIENT
+         * at map time ("listener function for opcode 2 of wl_surface
+         * is NULL"; every modern compositor sends the pair). FDK caps
+         * its own compositor bind at v4 — this package's binding MUST
+         * match (the version-alignment rule; the mock advertises v6
+         * and sends the pair to pin it). */
+        uint32_t v = version < 4 ? version : 4;
         shell->compositor = wl_registry_bind(
             registry, name, &wl_compositor_interface, v);
         if (shell->compositor == NULL) {
